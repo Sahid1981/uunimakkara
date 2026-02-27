@@ -5,7 +5,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Geocoder
 import android.location.Location
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -18,8 +17,18 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import com.google.android.gms.location.*
-import kotlinx.coroutines.*
+import androidx.core.net.toUri
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.util.Calendar
@@ -60,7 +69,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 updateLocation()
             } else {
-                tvLocation.text = "Sijaintilupa evätty. Käytetään oletuksena " + currentCity
+                tvLocation.text = "Sijaintilupa evätty. Käytetään oletuksena $currentCity"
             }
         }
 
@@ -114,7 +123,7 @@ class MainActivity : AppCompatActivity() {
         loadingDialog?.show()
 
         var searchCity = currentCity.lowercase().replace("ä", "a").replace("ö", "o").replace("å", "a")
-        val url = "https://www.lounaat.info/" + searchCity
+        val url = "https://www.lounaat.info/$searchCity"
         
         // Load page in WebView
         webView.webViewClient = object : WebViewClient() {
@@ -251,7 +260,8 @@ class MainActivity : AppCompatActivity() {
         val handler = Handler(Looper.getMainLooper())
         val timeoutRunnable = Runnable {
             if (tvLocation.text == "Paikannetaan...") {
-                tvLocation.text = "Paikannus aikakatkaistiin. Tarkista GPS.\n Käytetään " + currentCity
+                tvLocation.text =
+                    "Paikannus aikakatkaistiin. Tarkista GPS.\n Käytetään $currentCity"
             }
         }
         handler.postDelayed(timeoutRunnable, 15000) 
@@ -319,7 +329,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
-    private suspend fun analyzeDayDocument(doc: Document, checkToday: Boolean = false): List<SausageResult> {
+    private fun analyzeDayDocument(doc: Document, checkToday: Boolean = false): List<SausageResult> {
         val findings = mutableListOf<SausageResult>()
         val geocoder = Geocoder(this@MainActivity, Locale("fi", "FI")) 
 
@@ -368,8 +378,8 @@ class MainActivity : AppCompatActivity() {
 
                 if (skipRestaurant) continue
 
-                var additionalInfo = ""
-                
+                var additionalInfo: String
+
                 if (checkToday) {
                     if (isSausageToday(itemText, todayName, pageDay)) {
                         additionalInfo = "Mahdollisesti tänään"
@@ -457,7 +467,7 @@ class MainActivity : AppCompatActivity() {
             builder.setItems(adapterItems) { _, which ->
                 val link = findings[which].link
                 if (link.isNotEmpty()) {
-                    val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(link))
+                    val browserIntent = Intent(Intent.ACTION_VIEW, link.toUri())
                     startActivity(browserIntent)
                 }
             }

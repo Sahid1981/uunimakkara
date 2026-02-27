@@ -33,6 +33,9 @@ jobs:
     - name: Build APK
       run: ./gradlew build
 
+    - name: Rename APK
+      run: mv ./app/build/outputs/apk/debug/app-debug.apk ./app/build/outputs/apk/debug/uunimakkara-${{ github.ref_name }}.apk
+
     - name: Generate release notes
       id: changelog
       run: |
@@ -57,7 +60,7 @@ jobs:
         body: |
           ## Changes in this release
           ${{ steps.changelog.outputs.changelog }}
-        files: ./app/build/outputs/apk/debug/app-debug.apk
+        files: ./app/build/outputs/apk/debug/uunimakkara-${{ github.ref_name }}.apk
         draft: false
         prerelease: false
       env:
