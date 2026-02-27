@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Uunimakkara Image Palette -->
+    <color name="makkara_bg_yellow">#FDD888</color>
+    <color name="makkara_dark_brown">#3E2718</color>
+    <color name="makkara_red">#C85A3A</color>
+    <color name="makkara_green">#7CB368</color>
+    <color name="makkara_mash_yellow">#FFCA58</color>
+    
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Theme Mapping -->
+    <color name="colorPrimary">#C85A3A</color> <!-- Makkara Red -->
+    <color name="colorPrimaryVariant">#3E2718</color> <!-- Dark Brown -->
+    <color name="colorOnPrimary">#FFFFFF</color>
+    
+    <color name="colorSecondary">#7CB368</color> <!-- Green -->
+    <color name="colorSecondaryVariant">#3E2718</color>
+    <color name="colorOnSecondary">#FFFFFF</color>
+    
+    <color name="colorBackground">#FDD888</color> <!-- Yellow BG -->
+    <color name="colorSurface">#FDD888</color>
+    <color name="colorOnSurface">#3E2718</color> <!-- Dark Brown Text -->
+    <color name="colorOnBackground">#3E2718</color>
+</resources>
