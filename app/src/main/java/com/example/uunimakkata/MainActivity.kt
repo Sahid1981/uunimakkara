@@ -33,12 +33,19 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.util.Calendar
 import java.util.Locale
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 data class SausageResult(
     val restaurant: String,
     val link: String,
     val additionalInfo: String, 
     val distanceInKm: Double? = null
+)
+
+data class SearchDay(
+    val hash: String,
+    val label: String
 )
 
 class MainActivity : AppCompatActivity() {
@@ -57,9 +64,10 @@ class MainActivity : AppCompatActivity() {
 
     // Week search related variables
     private val weekFindings = mutableListOf<SausageResult>()
+    private val weekFindingKeys = mutableSetOf<String>()
     private var currentDayIndex = 0
     // Number to differentiate days in the URL hash
-    private val daysToSearch = listOf("5", "6", "7", "8", "9") // Pe, La, Su, Ma, Ti (hash values from the HTML)
+    private var daysToSearch = listOf<SearchDay>() // Will be populated dynamically
 
     @SuppressLint("SetTextI18n")
     private val requestPermissionLauncher =
@@ -112,6 +120,44 @@ class MainActivity : AppCompatActivity() {
     private var searchOnlyToday = false
     private var loadingDialog: AlertDialog? = null
 
+    private fun generateDaysToSearch(): List<SearchDay> {
+        // Map weekday constants to hash values used in the website
+        val hashMap = mapOf(
+            Calendar.MONDAY to "8",
+            Calendar.TUESDAY to "9",
+            Calendar.WEDNESDAY to "3",
+            Calendar.THURSDAY to "4",
+            Calendar.FRIDAY to "5",
+            Calendar.SATURDAY to "6",
+            Calendar.SUNDAY to "7"
+        )
+        
+        val calendar = Calendar.getInstance()
+        val days = mutableListOf<SearchDay>()
+        
+        android.util.Log.d("UuniSearch", "Today is ${getTodayName()}")
+        
+        // Get today + next 5 days
+        for (i in 0..5) {
+            val dayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
+            val dayOfMonth = calendar.get(Calendar.DAY_OF_MONTH)
+            val monthOfYear = calendar.get(Calendar.MONTH)
+            val hash = hashMap[dayOfWeek]
+            
+            val dayName = calendar.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.SHORT, Locale("fi", "FI"))
+            val fullDate = "$dayName ${dayOfMonth}.${monthOfYear + 1}."
+            
+            if (hash != null) {
+                days.add(SearchDay(hash = hash, label = fullDate))
+                android.util.Log.d("UuniSearch", "Day $i: $fullDate (hash #$hash)")
+            }
+            
+            calendar.add(Calendar.DAY_OF_MONTH, 1)
+        }
+        
+        return days
+    }
+
     private fun startSearch(onlyToday: Boolean) {
         searchOnlyToday = onlyToday
         
@@ -142,33 +188,186 @@ class MainActivity : AppCompatActivity() {
                 // Today view: just load current day
                 loadAndProcessCurrentPage()
             } else {
-                // Week view: iterate through all days
+                // Week view: iterate through 7 days
                 weekFindings.clear()
+                weekFindingKeys.clear()
                 currentDayIndex = 0
+
+                val availableDays = fetchDaysToSearchFromPage()
+                daysToSearch = if (availableDays.isNotEmpty()) {
+                    availableDays
+                } else {
+                    generateDaysToSearch()
+                }
+
+                android.util.Log.d("UuniSearch", "Week search days loaded from page: ${daysToSearch.size}")
+                daysToSearch.forEachIndexed { index, day ->
+                    android.util.Log.d("UuniSearch", "  [$index] ${day.label} (#${day.hash})")
+                }
+
+                if (daysToSearch.isEmpty()) {
+                    loadingDialog?.dismiss()
+                    showResults(emptyList(), false)
+                    return@launch
+                }
+
                 loadNextDay()
+            }
+        }
+    }
+
+    private suspend fun fetchDaysToSearchFromPage(): List<SearchDay> = suspendCancellableCoroutine { continuation ->
+        val js = """
+            (function() {
+                var links = document.querySelectorAll('.dayview-filter a');
+                var out = [];
+                for (var i = 0; i < links.length; i++) {
+                    var href = links[i].getAttribute('href') || '';
+                    var text = (links[i].textContent || '').trim();
+                    out.push(href + '@@' + text);
+                }
+                return out.join('||');
+            })();
+        """.trimIndent()
+
+        webView.evaluateJavascript(js) { rawResult ->
+            try {
+                val cleaned = rawResult
+                    ?.removePrefix("\"")
+                    ?.removeSuffix("\"")
+                    ?.replace("\\\"", "\"")
+                    ?.replace("\\n", "")
+                    ?.replace("\\u003C", "<")
+                    ?.replace("\\u003E", ">")
+                    ?.trim()
+                    ?: ""
+
+                val regex = Regex("#(\\d+)")
+                val parsed = mutableListOf<SearchDay>()
+
+                if (cleaned.isNotEmpty() && cleaned != "null") {
+                    cleaned.split("||").forEach { item ->
+                        val parts = item.split("@@")
+                        if (parts.size >= 2) {
+                            val href = parts[0]
+                            val label = parts[1].trim()
+                            val hash = regex.find(href)?.groupValues?.getOrNull(1)
+                            if (!hash.isNullOrEmpty() && label.isNotEmpty()) {
+                                parsed.add(SearchDay(hash = hash, label = label))
+                            }
+                        }
+                    }
+                }
+
+                continuation.resume(parsed)
+            } catch (e: Exception) {
+                android.util.Log.d("UuniSearch", "Failed to parse days from page: ${e.message}")
+                continuation.resume(emptyList())
             }
         }
     }
     
     private suspend fun scrollAndClickShowMore() {
-        delay(1000)
-        webView.evaluateJavascript("window.scrollTo(0, document.body.scrollHeight);", null)
-        
-        repeat(2) {
-            delay(1500)
-            val clickJs = """
-                var btn = document.querySelector('.button.showmore');
-                if (btn) {
-                    btn.click();
-                }
-            """.trimIndent()
-            webView.evaluateJavascript(clickJs, null)
-            
-            delay(2500)
+        delay(1200)
+
+        var rounds = 0
+        var stagnantRounds = 0
+        while (rounds < 8) {
+            val countBefore = getMenuCardCount()
             webView.evaluateJavascript("window.scrollTo(0, document.body.scrollHeight);", null)
+            delay(900)
+
+            val clicked = clickShowMoreButtonOnce()
+            if (!clicked) {
+                android.util.Log.d("UuniSearch", "Show more button not found on round $rounds")
+                break
+            }
+
+            android.util.Log.d("UuniSearch", "Show more clicked on round $rounds")
+            delay(2200)
+
+            val countAfter = getMenuCardCount()
+            if (countAfter <= countBefore) {
+                stagnantRounds++
+                android.util.Log.d("UuniSearch", "No new cards loaded ($countBefore -> $countAfter), stagnant rounds=$stagnantRounds")
+            } else {
+                stagnantRounds = 0
+                android.util.Log.d("UuniSearch", "New cards loaded ($countBefore -> $countAfter)")
+            }
+
+            if (stagnantRounds >= 2) {
+                android.util.Log.d("UuniSearch", "Stopping show more clicks because no new cards appeared")
+                break
+            }
+
+            rounds++
         }
-        
-        delay(1000)
+
+        delay(800)
+    }
+
+    private suspend fun getMenuCardCount(): Int = suspendCancellableCoroutine { continuation ->
+        val countJs = """
+            (function() {
+                var c1 = document.querySelectorAll('div.menu.item').length;
+                var c2 = document.querySelectorAll('div.item').length;
+                return c1 > 0 ? c1 : c2;
+            })();
+        """.trimIndent()
+
+        webView.evaluateJavascript(countJs) { rawResult ->
+            val count = rawResult?.replace("\"", "")?.trim()?.toIntOrNull() ?: 0
+            continuation.resume(count)
+        }
+    }
+
+    private suspend fun clickShowMoreButtonOnce(): Boolean = suspendCancellableCoroutine { continuation ->
+        val clickJs = """
+            (function() {
+                function clickElement(el) {
+                    if (!el) return false;
+                    try {
+                        el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    } catch (e) {}
+                    try {
+                        el.click();
+                    } catch (e) {}
+                    try {
+                        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    } catch (e) {}
+                    return true;
+                }
+
+                var selectors = [
+                    '.button.showmore',
+                    '.showmore',
+                    'button.showmore',
+                    'a.showmore',
+                    '[data-action="showmore"]',
+                    '.button[data-action="showmore"]'
+                ];
+
+                for (var i = 0; i < selectors.length; i++) {
+                    var el = document.querySelector(selectors[i]);
+                    if (clickElement(el)) return true;
+                }
+
+                var candidates = document.querySelectorAll('button, a, div, span');
+                for (var j = 0; j < candidates.length; j++) {
+                    var t = (candidates[j].textContent || '').trim().toLowerCase();
+                    if (t.indexOf('näytä lisää') !== -1 || t.indexOf('nayta lisaa') !== -1) {
+                        if (clickElement(candidates[j])) return true;
+                    }
+                }
+
+                return false;
+            })();
+        """.trimIndent()
+
+        webView.evaluateJavascript(clickJs) { rawResult ->
+            val clicked = rawResult?.contains("true", ignoreCase = true) == true
+            continuation.resume(clicked)
+        }
     }
     
     private suspend fun loadAndProcessCurrentPage() {
@@ -193,23 +392,42 @@ class MainActivity : AppCompatActivity() {
         }
         
         CoroutineScope(Dispatchers.Main).launch {
-            val dayHash = daysToSearch[currentDayIndex]
-            
-            // Click the day filter link
+            val searchDay = daysToSearch[currentDayIndex]
+            val dayHash = searchDay.hash
             delay(1000)
+
             val clickDayJs = """
-                var links = document.querySelectorAll('.dayview-filter a');
-                for (var i = 0; i < links.length; i++) {
-                    if (links[i].href.includes('#$dayHash')) {
-                        links[i].click();
-                        break;
+                (function() {
+                    var targetHash = '#$dayHash';
+                    var links = document.querySelectorAll('.dayview-filter a');
+                    var clicked = false;
+
+                    for (var i = 0; i < links.length; i++) {
+                        var href = links[i].getAttribute('href') || '';
+                        if (href.indexOf(targetHash) !== -1) {
+                            links[i].click();
+                            clicked = true;
+                            break;
+                        }
                     }
-                }
+
+                    if (!clicked) {
+                        window.location.hash = targetHash;
+                    }
+
+                    return clicked ? 'clicked:' + targetHash : 'hash-only:' + targetHash;
+                })();
             """.trimIndent()
-            webView.evaluateJavascript(clickDayJs, null)
-            
-            // Wait for page to update
-            delay(2000)
+
+            webView.evaluateJavascript(clickDayJs) { result ->
+                android.util.Log.d(
+                    "UuniSearch",
+                    "Navigate day $currentDayIndex/${daysToSearch.size - 1} -> ${searchDay.label} (#$dayHash), mode=$result"
+                )
+            }
+
+            // Wait for page to update after selecting target hash
+            delay(3500)
             
             // Scroll and click "show more"
             scrollAndClickShowMore()
@@ -230,8 +448,29 @@ class MainActivity : AppCompatActivity() {
                 analyzeDocument(doc, true)
             } else {
                 // For week view, collect results and continue to next day
-                val dayResults = analyzeDayDocument(doc)
-                weekFindings.addAll(dayResults)
+                val expectedDay = daysToSearch.getOrNull(currentDayIndex)?.label ?: "Päivä ${currentDayIndex + 1}"
+                val detectedDay = getDayInfo(doc)
+                val dayResults = analyzeDayDocument(doc, checkToday = false, forcedDayInfo = expectedDay)
+                
+                android.util.Log.d(
+                    "UuniSearch",
+                    "Day $currentDayIndex expected=$expectedDay, detected=$detectedDay: Found ${dayResults.size} results"
+                )
+                dayResults.forEach {
+                    android.util.Log.d("UuniSearch", "  - ${it.restaurant}: ${it.additionalInfo}")
+                }
+                
+                for (result in dayResults) {
+                    val keyBase = if (result.link.isNotBlank()) result.link else result.restaurant.lowercase()
+                    val key = "${result.additionalInfo}|$keyBase"
+                    if (weekFindingKeys.add(key)) {
+                        weekFindings.add(result)
+                    } else {
+                        android.util.Log.d("UuniSearch", "  Duplicate skipped: ${result.additionalInfo} - ${result.restaurant}")
+                    }
+                }
+                
+                android.util.Log.d("UuniSearch", "Total findings so far: ${weekFindings.size}")
                 currentDayIndex++
                 withContext(Dispatchers.Main) {
                     loadNextDay()
@@ -329,7 +568,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
-    private fun analyzeDayDocument(doc: Document, checkToday: Boolean = false): List<SausageResult> {
+    private fun analyzeDayDocument(doc: Document, checkToday: Boolean = false, forcedDayInfo: String? = null): List<SausageResult> {
         val findings = mutableListOf<SausageResult>()
         val geocoder = Geocoder(this@MainActivity, Locale("fi", "FI")) 
 
@@ -339,15 +578,29 @@ class MainActivity : AppCompatActivity() {
             val items = doc.select("div.menu.item") 
             val candidates = if (items.isEmpty()) doc.select("div.item") else items
             
+            // Debug logging for week search
+            if (!checkToday) {
+                android.util.Log.d("UuniSearch", "Week search - Found ${candidates.size} candidates with selector ${if (items.isNotEmpty()) "div.menu.item" else "div.item"}")
+                android.util.Log.d("UuniSearch", "Day info: ${getDayInfo(doc)}")
+            }
+            
             val todayName = getTodayName() 
 
             for (item in candidates) {
                 val itemText = item.text().lowercase()
                 
-                if (!containsSearchWord(itemText)) continue
+                if (!containsSearchWord(itemText)) {
+                    if (!checkToday && findings.isEmpty()) {
+                        android.util.Log.d("UuniSearch", "Item filtered out (no search word): ${itemText.take(50)}")
+                    }
+                    continue
+                }
 
                 val restaurantElement = item.select("h3 a")
-                if (restaurantElement.isEmpty()) continue
+                if (restaurantElement.isEmpty()) {
+                    android.util.Log.d("UuniSearch", "Item has search word but no h3 a element: ${itemText.take(50)}")
+                    continue
+                }
                 
                 val restaurantName = restaurantElement.text()
                 val restaurantLink = restaurantElement.attr("abs:href")
@@ -384,12 +637,16 @@ class MainActivity : AppCompatActivity() {
                     if (isSausageToday(itemText, todayName, pageDay)) {
                         additionalInfo = "Mahdollisesti tänään"
                         findings.add(SausageResult(restaurantName, restaurantLink, additionalInfo, distance))
+                        android.util.Log.d("UuniSearch", "Today: Added $restaurantName")
                     }
                 } else {
                     // Week view: get day from page
-                    val dayInfo = getDayInfo(doc)
+                    val dayInfo = forcedDayInfo ?: getDayInfo(doc)
                     additionalInfo = dayInfo
                     findings.add(SausageResult(restaurantName, restaurantLink, additionalInfo, distance))
+                    if (findings.size <= 3) {
+                        android.util.Log.d("UuniSearch", "Week: Added $restaurantName for $dayInfo")
+                    }
                 }
             }
 
@@ -401,11 +658,52 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun getDayInfo(doc: Document): String {
-        // Try to get the current day from the page title or filter
+        // Try multiple ways to get the current day from the page
+        
+        // 1. Try data-lounaat-filter
         val filterText = doc.select("[data-lounaat-filter='day-text']").text()
         if (filterText.isNotEmpty()) {
+            android.util.Log.d("UuniSearch", "Day found from filter: $filterText")
             return filterText.trim()
         }
+        
+        // 2. Try page title
+        val title = doc.title().lowercase()
+        for (day in weekDays) {
+            if (title.contains(day.trim())) {
+                android.util.Log.d("UuniSearch", "Day found from title: $day")
+                return day.trim()
+            }
+        }
+        
+        // 3. Try h1 headers
+        val h1Text = doc.select("h1").text().lowercase()
+        for (day in weekDays) {
+            if (h1Text.contains(day.trim())) {
+                android.util.Log.d("UuniSearch", "Day found from h1: $day")
+                return day.trim()
+            }
+        }
+        
+        // 4. Try h2 headers
+        val h2Text = doc.select("h2").text().lowercase()
+        for (day in weekDays) {
+            if (h2Text.contains(day.trim())) {
+                android.util.Log.d("UuniSearch", "Day found from h2: $day")
+                return day.trim()
+            }
+        }
+        
+        // 5. Try to find day in active filter links
+        val activeFilter = doc.select(".dayview-filter a.active").text().lowercase()
+        for (day in weekDays) {
+            if (activeFilter.contains(day.trim())) {
+                android.util.Log.d("UuniSearch", "Day found from active filter: $day")
+                return day.trim()
+            }
+        }
+        
+        android.util.Log.d("UuniSearch", "Day not found, using default")
         return "Tällä viikolla"
     }
     
