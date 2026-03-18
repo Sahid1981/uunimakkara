@@ -1,0 +1,42 @@
+workflows:
+	uunimakkara-apk:
+		name: Build uunimakkara APK
+		max_build_duration: 60
+		instance_type: mac_mini_m2
+
+		triggering:
+			events:
+				- push
+			branch_patterns:
+				- pattern: "*"
+					include: true
+					source: true
+
+		environment:
+			java: 17
+
+		scripts:
+			- name: Ensure Gradle wrapper is executable
+				script: |
+					chmod +x ./gradlew
+
+			- name: Build Debug APK
+				script: |
+					./gradlew clean :app:assembleDebug
+
+			- name: Publish APK with fixed name
+				script: |
+					mkdir -p "$CM_BUILD_DIR/artifacts"
+					cp "app/build/outputs/apk/debug/app-debug.apk" "$CM_BUILD_DIR/artifacts/uunimakkara.apk"
+
+		artifacts:
+			- artifacts/uunimakkara.apk
+			- app/build/outputs/logs/*.log
+
+		publishing:
+			email:
+				recipients:
+					- juha.jermalainen@gmail.com
+				notify:
+					success: true
+					failure: true
